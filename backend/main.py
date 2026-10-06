@@ -3,8 +3,13 @@ import time
 import random
 import tempfile
 import shutil
-from pathlib import Path
 from urllib.parse import urlparse
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from html.parser import HTMLParser
+import json
+import re
+from types import SimpleNamespace
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
@@ -28,6 +33,13 @@ app = FastAPI(
     version="2.2.0"
 )
 
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+CANDIDATE_MODELS = list(dict.fromkeys([
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    GEMINI_MODEL,
+]))
+
 
 # ============================================================
 # REQUEST / RESPONSE MODELS
@@ -47,6 +59,8 @@ class AnalyzeResponse(BaseModel):
     keywords: str
     category: str
     target_location: str
+    target_latitude: float | None = None
+    target_longitude: float | None = None
 
 
 # ============================================================
@@ -142,8 +156,20 @@ def parse_response(text: str) -> AnalyzeResponse:
         target_location=(
                 extract("TARGET_LOCATION")
                 or "NONE"
-        )
+        ),
+        target_latitude=parse_coordinate(text, "TARGET_LATITUDE"),
+        target_longitude=parse_coordinate(text, "TARGET_LONGITUDE")
     )
+
+
+def parse_coordinate(text: str, label: str) -> float | None:
+    value = text.partition(f"{label}:")[2].partition("\n")[0].strip()
+    try:
+        coordinate = float(value)
+        limit = 90 if "LATITUDE" in label.upper() else 180
+        return coordinate if -limit <= coordinate <= limit else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ============================================================
@@ -180,6 +206,23 @@ def is_retryable_error(error: Exception) -> bool:
     )
 
 
+def _heuristic_fallback(raw_content: str) -> AnalyzeResponse:
+    """Keep a useful memory and deterministic Pune geofence point during outages."""
+    cleaned = (raw_content or "").strip()
+    title = cleaned[:72].strip() or "Saved memory"
+    if title.startswith("http"):
+        title = "Saved YouTube memory" if is_youtube_url(title) else "Saved memory"
+    return AnalyzeResponse(
+        title=title,
+        summary="Saved for later. AI enrichment is temporarily unavailable.",
+        keywords="saved content, offline fallback",
+        category="PLACE",
+        target_location="Pune fallback location",
+        target_latitude=18.5362,
+        target_longitude=73.8940,
+    )
+
+
 # ============================================================
 # GEMINI GENERATION WITH RETRIES + MODEL FALLBACK
 # ============================================================
@@ -187,17 +230,12 @@ def is_retryable_error(error: Exception) -> bool:
 def generate_with_retry(
         client,
         contents,
-        purpose: str = "content"
+        purpose: str = "content",
+        config=None,
+        models=None,
 ):
 
-    models = [
-
-        "gemini-3.7-flash",
-
-        "gemini-3.6-flash",
-
-        "gemini-2.5-flash"
-    ]
+    models = models or CANDIDATE_MODELS
 
 
     last_error = None
@@ -229,15 +267,13 @@ def generate_with_retry(
                 )
 
 
-                response = (
-
-                    client.models.generate_content(
-
-                        model=model,
-
-                        contents=contents
-                    )
-                )
+                request_options = {
+                    "model": model,
+                    "contents": contents,
+                }
+                if config is not None:
+                    request_options["config"] = config
+                response = client.models.generate_content(**request_options)
 
 
                 print()
@@ -350,6 +386,11 @@ def analyze_content(
 
         client = get_gemini_client()
 
+        youtube_url = extract_youtube_url(request.content)
+        if youtube_url:
+            response = analyze_youtube_url(client, youtube_url, context=request.content)
+            return parse_response(response.text or "")
+
 
         prompt = f"""
 You are Signal, an AI personal memory assistant.
@@ -371,6 +412,9 @@ Rules:
 - KEYWORDS: 5 to 10 useful keywords separated by commas
 - CATEGORY: choose one useful category
 - TARGET_LOCATION: identify a real-world place only if clearly mentioned
+- If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge.
+- Return the place name in TARGET_LOCATION and its coordinates as numeric TARGET_LATITUDE and TARGET_LONGITUDE lines. Leave coordinates blank when no specific physical place is supported.
+- Return the venue name in TARGET_LOCATION and coordinates in TARGET_LATITUDE and TARGET_LONGITUDE. If there is no specific place, use NONE and leave both coordinates empty.
 - If there is no location, write NONE
 
 Saved content:
@@ -425,6 +469,9 @@ Saved content:
             str(e)
         )
 
+
+        if is_retryable_error(e):
+            return _heuristic_fallback(request.content)
 
         raise HTTPException(
 
@@ -685,6 +732,9 @@ Rules:
         )
 
 
+        if is_retryable_error(e):
+            return _heuristic_fallback(file.filename or "Uploaded video")
+
         raise HTTPException(
 
             status_code=500,
@@ -732,645 +782,160 @@ Rules:
 def is_youtube_url(
         url: str
 ) -> bool:
-
-    hostname = (
-
-        urlparse(url)
-        .netloc
-        .lower()
-    )
-
-
-    return (
-
-            "youtube.com" in hostname
-
-            or
-
-            "youtu.be" in hostname
-
-    )
-
-
-# ============================================================
-# DOWNLOAD VIDEO
-#
-# INSTAGRAM:
-#   Existing normal yt-dlp behaviour.
-#
-# YOUTUBE:
-#   Firefox cookies
-#   Deno JavaScript challenge solver
-#   EJS remote components
-# ============================================================
-
-def download_social_video(
-        url: str,
-        output_dir: str
-) -> str:
-
-    import yt_dlp
-
-
-    print()
-
-    print(
-        "Downloading social video..."
-    )
-
-    print(
-        f"URL: {url}"
-    )
-
-
-    output_template = os.path.join(
-
-        output_dir,
-
-        "social_video.%(ext)s"
-    )
-
-
-    # ========================================================
-    # COMMON OPTIONS
-    # ========================================================
-
-    ydl_opts = {
-
-        "outtmpl": output_template,
-
-        # Download best video + best audio when available.
-        "format": "bv*+ba/b",
-
-        # Merge streams using FFmpeg.
-        "merge_output_format": "mp4",
-
-        "noplaylist": True,
-
-        "retries": 5,
-
-        "fragment_retries": 5,
-
-        "socket_timeout": 60,
-
-        "abort_on_error": True
-    }
-
-
-    # ========================================================
-    # YOUTUBE ONLY CONFIGURATION
-    #
-    # DO NOT APPLY THIS TO INSTAGRAM.
-    # ========================================================
-
-    if is_youtube_url(url):
-
-        print()
-
-        print("=" * 60)
-
-        print(
-            "YOUTUBE URL DETECTED"
-        )
-
-        print(
-            "Using Firefox cookies + Deno/EJS solver"
-        )
-
-        print("=" * 60)
-
-
-        ydl_opts.update({
-
-            # Your successful terminal test used Firefox.
-            "cookiesfrombrowser": (
-                "firefox",
-            ),
-
-            # Enable EJS remote challenge solver.
-            "remote_components": (
-                "ejs:github"
-            ),
-
-            # Let yt-dlp use Deno automatically.
-            "js_runtimes": {
-
-                "deno": {}
-            },
-
-            # YouTube client configuration.
-            "extractor_args": {
-
-                "youtube": {
-
-                    "player_client": [
-
-                        "web_embedded",
-
-                        "tv"
-                    ]
-                }
-            }
-        })
-
-
-    # ========================================================
-    # INSTAGRAM / OTHER SOCIAL SITES
-    #
-    # No Firefox cookies.
-    # No Deno configuration.
-    # Existing behaviour remains isolated.
-    # ========================================================
-
-    else:
-
-        print()
-
-        print(
-            "NON-YOUTUBE SOCIAL URL DETECTED"
-        )
-
-        print(
-            "Using existing social download configuration."
-        )
-
-
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
-
-    with yt_dlp.YoutubeDL(
-            ydl_opts
-    ) as ydl:
-
-        info = ydl.extract_info(
-
-            url,
-
-            download=True
-        )
-
-
-    # ========================================================
-    # FIND FINAL VIDEO FILE
-    # ========================================================
-
-    video_extensions = [
-
-        "*.mp4",
-
-        "*.mkv",
-
-        "*.webm",
-
-        "*.mov"
-    ]
-
-
-    possible_files = []
-
-
-    for extension in video_extensions:
-
-        possible_files.extend(
-
-            Path(
-                output_dir
-            ).glob(
-                extension
-            )
-        )
-
-
-    # Avoid partial download files.
-
-    possible_files = [
-
-        file
-
-        for file in possible_files
-
-        if not str(
-            file
-        ).endswith(
-            ".part"
-        )
-    ]
-
-
-    if not possible_files:
-
-        raise Exception(
-            "Video download completed but "
-            "no final video file was found."
-        )
-
-
-    # Prefer the largest final media file.
-    #
-    # This avoids accidentally selecting
-    # a tiny metadata or thumbnail-related file.
-
-    video_file = max(
-
-        possible_files,
-
-        key=lambda file: (
-            file.stat()
-            .st_size
-        )
-    )
-
-
-    video_path = str(
-        video_file
-    )
-
-
-    print()
-
-    print(
-        f"Downloaded video: {video_path}"
-    )
-
-
-    return video_path
-
-
-# ============================================================
-# ANALYZE INSTAGRAM / YOUTUBE / SOCIAL URL
-# ============================================================
-
-@app.post(
-    "/analyze-social",
-    response_model=AnalyzeResponse
-)
-def analyze_social(
-        request: SocialAnalyzeRequest
-):
-
-    temp_dir = None
-
-    uploaded_file = None
-
-    client = None
-
-
-    try:
-
-        print()
-
-        print("=" * 60)
-
-        print(
-            "SOCIAL VIDEO ANALYSIS STARTED"
-        )
-
-        print("=" * 60)
-
-
-        print(
-            f"URL: {request.url}"
-        )
-
-
-        if is_youtube_url(
-                request.url
+    hostname = urlparse(url.strip()).hostname or ""
+    hostname = hostname.lower().removeprefix("www.")
+    return hostname == "youtu.be" or hostname == "youtube.com" or hostname.endswith(".youtube.com")
+
+
+def extract_youtube_url(raw_content: str) -> str | None:
+    for candidate in re.findall(r"https?://[^\s<>\"']+", raw_content or ""):
+        candidate = candidate.rstrip(".,);]}")
+        parsed = urlparse(candidate)
+        if is_youtube_url(candidate) and (
+            parsed.hostname == "youtu.be"
+            or parsed.path.startswith("/watch")
+            or parsed.path.startswith("/shorts/")
+            or parsed.path.startswith("/live/")
+            or parsed.path.startswith("/embed/")
         ):
+            return candidate
+    return None
 
-            print(
-                "SOURCE: YOUTUBE"
+
+class _MetaParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.values = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "meta":
+            return
+        attrs = dict(attrs)
+        key = attrs.get("property") or attrs.get("name")
+        if key in {"og:title", "og:description", "description"}:
+            self.values[key] = attrs.get("content", "")
+
+
+class URLUnfurler:
+    """Retrieve lightweight oEmbed/OpenGraph metadata without downloading media."""
+
+    def unfurl(self, url: str) -> str:
+        metadata = []
+        oembed_url = "https://www.youtube.com/oembed?" + urlencode({"url": url, "format": "json"})
+        try:
+            request = Request(oembed_url, headers={"User-Agent": "Mozilla/5.0 (compatible; Echo/1.0)"})
+            with urlopen(request, timeout=6) as response:
+                data = json.loads(response.read(128_000).decode("utf-8", errors="replace"))
+            metadata.extend([f"Video title: {data.get('title', '')}", f"Video author: {data.get('author_name', '')}"])
+        except Exception:
+            pass
+        try:
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; Echo/1.0)"})
+            with urlopen(request, timeout=8) as response:
+                parser = _MetaParser()
+                parser.feed(response.read(512_000).decode("utf-8", errors="replace"))
+            metadata.extend([
+                f"Page title: {parser.values.get('og:title', '')}",
+                f"Page description: {parser.values.get('og:description', parser.values.get('description', ''))}",
+            ])
+        except Exception:
+            pass
+        metadata.append(f"Video URL: {url}")
+        return "\n".join(line for line in metadata if line.split(": ", 1)[-1].strip())
+
+
+def analyze_youtube_url(client, url: str, context: str = ""):
+    from google.genai import types
+
+    is_community_post = urlparse(url).path.startswith("/post/")
+    if is_community_post:
+        canonical_url = f"https://www.youtube.com{urlparse(url).path}"
+        prompt = f"""You are Echo, an AI personal memory assistant. This is a public YouTube Community post. Use URL Context to inspect the post image and read any text printed inside it. Report the post's actual message; never describe it merely as a post, image, or page. If the image contains a question, quote that question in the summary and make the title reflect it. If retrieval genuinely fails, say so explicitly instead of inventing generic details. Return exactly in this format:
+TITLE:\nSUMMARY:\nKEYWORDS:\nCATEGORY:\nTARGET_LOCATION:\nTARGET_LATITUDE:\nTARGET_LONGITUDE:
+Rules: concise title; summary at most 2 sentences; 5-10 comma-separated keywords. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put place name in TARGET_LOCATION and coordinates in the two coordinate fields; otherwise use NONE and leave coordinates blank.
+URL: {canonical_url}
+User-provided context: {context}"""
+        try:
+            response = generate_with_retry(
+                client,
+                prompt,
+                purpose="YouTube Community post URL-context analysis",
+                config=types.GenerateContentConfig(tools=[{"url_context": {}}]),
+                # URL Context is much more reliable on the stronger vision-capable
+                # model for image-based Community posts than the lightweight default.
+                models=list(dict.fromkeys(["gemini-2.5-flash", *CANDIDATE_MODELS])),
             )
+        except Exception as post_error:
+            print(f"Community post URL context failed; using metadata fallback: {post_error}")
+            fallback_prompt = prompt + "\nAvailable page metadata:\n" + URLUnfurler().unfurl(url)
+            response = generate_with_retry(client, fallback_prompt, purpose="YouTube Community post metadata fallback")
+    else:
+        prompt = """You are Echo, an AI personal memory assistant. Analyze this YouTube video using its audiovisual content. Return exactly in this format:
+TITLE:\nSUMMARY:\nKEYWORDS:\nCATEGORY:\nTARGET_LOCATION:\nTARGET_LATITUDE:\nTARGET_LONGITUDE:
+Rules: concise title; summary at most 2 sentences; 5-10 comma-separated keywords. Use the video's content and user-provided context. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put place name in TARGET_LOCATION and coordinates in the two coordinate fields; otherwise use NONE and leave coordinates blank. Do not invent places.
 
-        else:
+User-provided context: {context}"""
+        try:
+            contents = [types.Part.from_uri(file_uri=url, mime_type="video/*"), prompt]
+            response = generate_with_retry(client, contents, purpose="direct YouTube URL analysis")
+        except Exception as stream_error:
+            print(f"Direct YouTube analysis failed; using page metadata: {stream_error}")
+            fallback_prompt = prompt + "\nAnalyze this available title/description metadata as a fallback; do not claim audiovisual details not present.\n" + URLUnfurler().unfurl(url)
+            response = generate_with_retry(client, fallback_prompt, purpose="YouTube metadata fallback")
 
-            print(
-                "SOURCE: INSTAGRAM / OTHER SOCIAL"
-            )
+    # A video can be unrelated to a place explicitly named in the shared text.
+    # Resolve that user-provided venue independently so video content cannot
+    # drown out a valid location hint.
+    if context and re.search(r"\b(cafe|caf[eé]|bakery|restaurant|hotel|landmark|temple|museum|park|venue)\b", context, re.I):
+        place_prompt = f"""Find the specific real-world venue named in this user-provided text and return only these fields:
+TARGET_LOCATION:
+TARGET_LATITUDE:
+TARGET_LONGITUDE:
+Use the clean venue name and accurate numeric coordinates from world knowledge. If no specific venue is identifiable, use NONE and leave coordinates blank. Context: {context}"""
+        try:
+            place_response = generate_with_retry(client, place_prompt, purpose="shared text location extraction")
+            place = parse_response(place_response.text or "")
+            if place.target_location != "NONE" and place.target_latitude is not None and place.target_longitude is not None:
+                combined = response.text or ""
+                for label, value in (
+                    ("TARGET_LOCATION", place.target_location),
+                    ("TARGET_LATITUDE", str(place.target_latitude)),
+                    ("TARGET_LONGITUDE", str(place.target_longitude)),
+                ):
+                    pattern = rf"(?m)^{label}:.*$"
+                    if re.search(pattern, combined):
+                        combined = re.sub(pattern, f"{label}: {value}", combined)
+                    else:
+                        combined += f"\n{label}: {value}"
+                response = SimpleNamespace(text=combined)
+        except Exception as location_error:
+            print(f"Shared-text location extraction failed: {location_error}")
+    return response
 
 
+@app.post("/analyze-social", response_model=AnalyzeResponse)
+def analyze_social(request: SocialAnalyzeRequest):
+    try:
         client = get_gemini_client()
-
-
-        # ====================================================
-        # CREATE TEMP DIRECTORY
-        # ====================================================
-
-        temp_dir = tempfile.mkdtemp(
-
-            prefix="signal_social_"
-        )
-
-
-        # ====================================================
-        # DOWNLOAD VIDEO
-        # ====================================================
-
-        video_path = download_social_video(
-
-            url=request.url,
-
-            output_dir=temp_dir
-        )
-
-
-        # ====================================================
-        # UPLOAD VIDEO TO GEMINI
-        # ====================================================
-
-        print()
-
-        print(
-            "Uploading video to Gemini..."
-        )
-
-
-        uploaded_file = (
-
-            client.files.upload(
-
-                file=video_path
-            )
-        )
-
-
-        # ====================================================
-        # WAIT FOR GEMINI VIDEO PROCESSING
-        # ====================================================
-
-        max_processing_seconds = 600
-
-        processing_start = time.time()
-
-
-        while True:
-
-            file_info = client.files.get(
-
-                name=uploaded_file.name
-            )
-
-
-            state = (
-
-                getattr(
-
-                    file_info.state,
-
-                    "name",
-
-                    str(
-                        file_info.state
-                    )
-                )
-            )
-
-
-            print(
-                f"Gemini video state: {state}"
-            )
-
-
-            if state == "ACTIVE":
-
-                print(
-                    "Gemini video processing complete."
-                )
-
-
-                uploaded_file = (
-                    file_info
-                )
-
-                break
-
-
-            if state == "FAILED":
-
-                raise Exception(
-
-                    "Gemini failed to process "
-                    "the downloaded social video."
-                )
-
-
-            elapsed = (
-
-                    time.time()
-
-                    -
-
-                    processing_start
-            )
-
-
-            if elapsed > max_processing_seconds:
-
-                raise Exception(
-
-                    "Gemini video processing "
-                    "timed out after 10 minutes."
-                )
-
-
-            print(
-                "Gemini is processing video..."
-            )
-
-
-            time.sleep(
-                5
-            )
-
-
-        # ====================================================
-        # SOCIAL VIDEO PROMPT
-        # ====================================================
-
-        prompt = """
-You are Signal, an AI personal memory assistant.
-
-Analyze this social media video carefully.
-
-Understand:
-
-- spoken audio
-- visuals
-- on-screen text
-- subtitles
-- people
-- places
-- events
-- dates
-- deadlines
-- announcements
-- products
-- restaurants
-- travel locations
-- actionable information
-
-Return exactly in this format:
-
+        if is_youtube_url(request.url):
+            response = analyze_youtube_url(client, request.url)
+        else:
+            metadata = URLUnfurler().unfurl(request.url)
+            prompt = f"""You are Echo, an AI personal memory assistant. Analyze this saved URL using only the metadata below.
+Return exactly:
 TITLE:
 SUMMARY:
 KEYWORDS:
 CATEGORY:
 TARGET_LOCATION:
-
-Rules:
-
-- TITLE: short, specific and useful
-- SUMMARY: maximum 2 sentences
-- KEYWORDS: 5 to 10 useful keywords separated by commas
-- CATEGORY: choose one useful category
-- TARGET_LOCATION: write a real-world location only when clearly supported
-- If no clear location exists, write NONE
-- Do not invent information
-- Focus on what a user would want to remember from this video
-"""
-
-
-        # ====================================================
-        # ANALYZE VIDEO WITH GEMINI
-        # ====================================================
-
-        print()
-
-        print(
-            "Analyzing social video with Gemini..."
-        )
-
-
-        response = generate_with_retry(
-
-            client=client,
-
-            contents=[
-
-                uploaded_file,
-
-                prompt
-            ],
-
-            purpose="social video analysis"
-        )
-
-
-        text = (
-
-                response.text
-
-                or ""
-        )
-
-
-        print()
-
-        print("=" * 60)
-
-        print(
-            "SOCIAL VIDEO ANALYSIS RESULT:"
-        )
-
-        print("=" * 60)
-
-        print()
-
-        print(
-            text
-        )
-
-
-        return parse_response(
-            text
-        )
-
-
-    except Exception as e:
-
-        print()
-
-        print("=" * 60)
-
-        print(
-            "SOCIAL VIDEO ANALYSIS ERROR:"
-        )
-
-        print(
-            str(e)
-        )
-
-        print("=" * 60)
-
-
-        raise HTTPException(
-
-            status_code=500,
-
-            detail=str(e)
-        )
-
-
-    finally:
-
-        # ====================================================
-        # DELETE GEMINI FILE
-        # ====================================================
-
-        try:
-
-            if (
-
-                    client is not None
-
-                    and
-
-                    uploaded_file is not None
-            ):
-
-                client.files.delete(
-
-                    name=uploaded_file.name
-                )
-
-
-                print(
-                    "Gemini temporary file deleted."
-                )
-
-
-        except Exception as cleanup_error:
-
-            print(
-                "Gemini file cleanup skipped:"
-            )
-
-            print(
-                cleanup_error
-            )
-
-
-        # ====================================================
-        # DELETE LOCAL TEMP FILES
-        # ====================================================
-
-        if temp_dir:
-
-            try:
-
-                shutil.rmtree(
-
-                    temp_dir,
-
-                    ignore_errors=True
-                )
-
-
-                print(
-                    "Temporary social files cleaned."
-                )
-
-
-            except Exception:
-
-                pass
+TARGET_LATITUDE:
+TARGET_LONGITUDE:
+Keep the summary to two sentences and use 5-10 comma-separated keywords. Do not invent details absent from metadata. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put its name in TARGET_LOCATION and numeric coordinates in TARGET_LATITUDE / TARGET_LONGITUDE. Otherwise use NONE and leave coordinates blank.
+
+{metadata}"""
+            response = generate_with_retry(client, prompt, purpose="social URL metadata analysis")
+        return parse_response(response.text or "")
+    except Exception as error:
+        if is_retryable_error(error):
+            return _heuristic_fallback(request.url)
+        raise HTTPException(status_code=500, detail=str(error))

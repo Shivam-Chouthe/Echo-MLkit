@@ -177,6 +177,10 @@ class SignalAiService {
                     targetLocation =
                         response.target_location,
 
+                    targetLatitude = response.target_latitude,
+
+                    targetLongitude = response.target_longitude,
+
                     source =
                         AiSource.BACKEND
                 )
@@ -475,6 +479,10 @@ data class AiResult(
     val category: String,
 
     val targetLocation: String,
+
+    val targetLatitude: Double? = null,
+
+    val targetLongitude: Double? = null,
 
     val source: AiSource
 )

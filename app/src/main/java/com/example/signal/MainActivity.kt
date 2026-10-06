@@ -5,20 +5,24 @@ import com.example.signal.data.location.SignalNotificationHelper
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.runtime.LaunchedEffect
 import androidx.core.content.ContextCompat
 import androidx.navigation.compose.rememberNavController
 import com.example.signal.navigation.SignalNavGraph
 import com.example.signal.navigation.SignalRoutes
+import com.example.signal.data.ai.ImageOcrHelper
 import com.example.signal.ui.theme.SignalTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    private var sharedText: String? = null
+    private val sharedText = mutableStateOf<String?>(null)
 
     private var openedMemoryId =
         mutableStateOf<Long?>(null)
@@ -49,8 +53,7 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onCreate(savedInstanceState)
 
-        sharedText =
-            extractSharedText(intent)
+        processShareIntent(intent)
 
         openedMemoryId.value =
             intent.getLongExtra(
@@ -70,13 +73,13 @@ class MainActivity : ComponentActivity() {
 
                 SignalNavGraph(
                     navController = navController,
-                    sharedText = sharedText,
+                    sharedText = sharedText.value,
                     openedMemoryId = openedMemoryId.value
                 )
 
-                LaunchedEffect(sharedText) {
+                LaunchedEffect(sharedText.value) {
 
-                    if (!sharedText.isNullOrBlank()) {
+                    if (!sharedText.value.isNullOrBlank()) {
 
                         navController.navigate(
                             SignalRoutes.CAPTURE
@@ -96,8 +99,7 @@ class MainActivity : ComponentActivity() {
 
         setIntent(intent)
 
-        sharedText =
-            extractSharedText(intent)
+        processShareIntent(intent)
 
         openedMemoryId.value =
             intent.getLongExtra(
@@ -186,8 +188,32 @@ class MainActivity : ComponentActivity() {
             return null
         }
 
-        return intent.getStringExtra(
-            Intent.EXTRA_TEXT
-        )
+        if (intent.type?.startsWith("image/") == true) return null
+        return intent.getStringExtra(Intent.EXTRA_TEXT)
+    }
+
+    private fun processShareIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        if (intent.type?.startsWith("image/") == true) {
+            val uri = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            }
+            if (uri != null) {
+                lifecycleScope.launch {
+                    val text = ImageOcrHelper(this@MainActivity)
+                        .extractTextFromUri(uri)
+                    sharedText.value = text.ifBlank {
+                        "Captured photo/screenshot without detectable text"
+                    }
+                }
+            } else {
+                sharedText.value = "Captured image"
+            }
+        } else {
+            sharedText.value = extractSharedText(intent)
+        }
     }
 }

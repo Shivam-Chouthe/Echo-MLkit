@@ -13,5 +13,7 @@ data class ContentResult(
     val keywords: String,
     val category: String,
     val targetLocation: String,
+    val targetLatitude: Double? = null,
+    val targetLongitude: Double? = null,
     val source: com.example.signal.data.ai.AiSource
 )

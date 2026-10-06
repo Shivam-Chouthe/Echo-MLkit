@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -39,6 +40,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -71,6 +73,7 @@ fun LibraryScreen(
 
     // ── State from ViewModel ───────────────────────────
     val memories by viewModel.memories.collectAsState()
+    val isRefreshing by viewModel.isRefreshing.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val searchResults by viewModel.searchResults.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
@@ -147,28 +150,35 @@ fun LibraryScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             // ── Memory List or Empty State ─────────────
-            if (displayedMemories.isEmpty()) {
-                EmptyState(isSearching = isSearching)
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        start = 20.dp,
-                        end = 20.dp,
-                        top = 2.dp,
-                        bottom = 32.dp
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    items(
-                        items = displayedMemories,
-                        key = { it.id }
-                    ) { memory ->
-                        EchoMemoryCard(
-                            memory = memory,
-                            onClick = { onMemoryClick(memory.id) },
-                            onDelete = { viewModel.deleteMemory(memory) }
-                        )
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh = viewModel::pullToRefresh,
+                modifier = Modifier.weight(1f).fillMaxWidth()
+            ) {
+                if (displayedMemories.isEmpty()) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                    ) {
+                        EmptyState(isSearching = isSearching)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 20.dp,
+                            end = 20.dp,
+                            top = 2.dp,
+                            bottom = 32.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        items(items = displayedMemories, key = { it.id }) { memory ->
+                            EchoMemoryCard(
+                                memory = memory,
+                                onClick = { onMemoryClick(memory.id) },
+                                onDelete = { viewModel.deleteMemory(memory) }
+                            )
+                        }
                     }
                 }
             }

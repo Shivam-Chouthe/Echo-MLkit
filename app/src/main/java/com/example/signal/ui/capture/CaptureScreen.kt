@@ -1,6 +1,8 @@
 package com.example.signal.ui.capture
 
 import com.example.signal.data.location.SignalGeofenceManager
+import com.example.signal.data.ai.ImageOcrHelper
+import androidx.activity.result.PickVisualMediaRequest
 import com.example.signal.data.location.LocationGeocoder
 import com.example.signal.data.ai.AiSource
 import android.Manifest
@@ -112,6 +114,17 @@ fun CaptureScreen(
         mutableStateOf(false)
     }
 
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) coroutineScope.launch {
+            val extracted = ImageOcrHelper(context).extractTextFromUri(uri)
+            url = extracted.ifBlank { "Captured photo/screenshot without detectable text" }
+            showResult = true
+            saved = false
+        }
+    }
+
     var isAnalyzing by remember {
         mutableStateOf(false)
     }
@@ -144,6 +157,9 @@ fun CaptureScreen(
         mutableStateOf<Double?>(null)
     }
 
+    var modelTargetLatitude by remember { mutableStateOf<Double?>(null) }
+    var modelTargetLongitude by remember { mutableStateOf<Double?>(null) }
+
     var aiError by remember {
         mutableStateOf("")
     }
@@ -155,6 +171,16 @@ fun CaptureScreen(
             url = extractUrl(sharedText)
 
             showResult = true
+            saved = false
+            isAnalyzing = false
+            aiError = ""
+            aiSource = null
+            aiTitle = ""
+            aiSummary = ""
+            aiKeywords = ""
+            aiTargetLocation = ""
+            modelTargetLatitude = null
+            modelTargetLongitude = null
         }
     }
 
@@ -216,6 +242,15 @@ fun CaptureScreen(
         Spacer(
             modifier = Modifier.height(16.dp)
         )
+
+        Button(
+            onClick = { imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("ADD IMAGE / SCAN")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         Button(
             onClick = {
@@ -316,6 +351,9 @@ fun CaptureScreen(
                             aiTargetLocation =
                                 result.targetLocation
 
+                            modelTargetLatitude = result.targetLatitude
+                            modelTargetLongitude = result.targetLongitude
+
                             aiSource =
                                 result.source
 
@@ -355,10 +393,10 @@ fun CaptureScreen(
                             }
 
                         targetLatitude =
-                            geocodedTarget?.latitude
+                            modelTargetLatitude ?: geocodedTarget?.latitude
 
                         targetLongitude =
-                            geocodedTarget?.longitude
+                            modelTargetLongitude ?: geocodedTarget?.longitude
 
                         val memory =
                             MemoryEntity(

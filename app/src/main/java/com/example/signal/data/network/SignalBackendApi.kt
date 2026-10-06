@@ -19,7 +19,9 @@ data class AnalyzeResponse(
     val summary: String,
     val keywords: String,
     val category: String,
-    val target_location: String
+    val target_location: String,
+    val target_latitude: Double? = null,
+    val target_longitude: Double? = null
 )
 
 

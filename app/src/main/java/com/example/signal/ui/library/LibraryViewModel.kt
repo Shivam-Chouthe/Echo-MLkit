@@ -27,6 +27,10 @@ class LibraryViewModel(
     private val memoryDao =
         database.memoryDao()
 
+    private val refreshGeneration = MutableStateFlow(0)
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
     // --------------------------------------------------
     // SEARCH QUERY
     // --------------------------------------------------
@@ -42,13 +46,25 @@ class LibraryViewModel(
     // --------------------------------------------------
 
     val memories: StateFlow<List<MemoryEntity>> =
-        memoryDao
-            .getAllMemories()
+        refreshGeneration
+            .flatMapLatest { memoryDao.getAllMemories() }
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = emptyList()
             )
+
+    fun pullToRefresh() {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                memoryDao.getAllMemoriesSnapshot()
+                refreshGeneration.value += 1
+            } finally {
+                _isRefreshing.value = false
+            }
+        }
+    }
 
     // --------------------------------------------------
     // SEARCH RESULTS

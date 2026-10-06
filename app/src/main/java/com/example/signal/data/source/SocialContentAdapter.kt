@@ -24,6 +24,8 @@ class SocialContentAdapter(
             keywords = result.keywords,
             category = result.category,
             targetLocation = result.targetLocation,
+            targetLatitude = result.targetLatitude,
+            targetLongitude = result.targetLongitude,
             source = result.source
         )
     }
