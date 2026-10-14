@@ -1,5 +1,7 @@
 package com.example.signal.data.ai
 
+import android.content.Context
+import android.net.Uri
 import android.util.Log
 import com.example.signal.data.network.AnalyzeRequest
 import com.example.signal.data.network.SignalBackendClient
@@ -10,6 +12,10 @@ import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.GenerativeBackend
 import com.google.firebase.ai.type.Tool
 import kotlinx.coroutines.withTimeout
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.time.LocalDate
 
 
 class SignalAiService {
@@ -128,7 +134,11 @@ class SignalAiService {
                             .analyzeSocialContent(
 
                                 SocialAnalyzeRequest(
-                                    url = normalizedContent
+                                    url = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
+                                        .find(normalizedContent)?.value?.trimEnd('.', ',', ')', ']')
+                                        ?: normalizedContent,
+                                    capture_date = LocalDate.now().toString(),
+                                    shared_text = "$sourceContext\n$normalizedContent"
                                 )
                             )
                     }
@@ -180,6 +190,12 @@ class SignalAiService {
                     targetLatitude = response.target_latitude,
 
                     targetLongitude = response.target_longitude,
+
+                    reminderDate = response.reminder_date,
+
+                    reminderTime = response.reminder_time,
+
+                    detectedUrl = response.detected_url,
 
                     source =
                         AiSource.BACKEND
@@ -243,7 +259,8 @@ class SignalAiService {
                         .analyzeContent(
 
                             AnalyzeRequest(
-                                content = normalizedContent
+                                content = "$sourceContext\n$normalizedContent",
+                                capture_date = LocalDate.now().toString()
                             )
                         )
                 }
@@ -272,6 +289,12 @@ class SignalAiService {
                 targetLocation =
                     response.target_location,
 
+                reminderDate = response.reminder_date,
+
+                reminderTime = response.reminder_time,
+
+                detectedUrl = response.detected_url,
+
                 source =
                     AiSource.BACKEND
             )
@@ -292,9 +315,7 @@ class SignalAiService {
 
         try {
 
-            val isUrl =
-                normalizedContent.startsWith("http://") ||
-                        normalizedContent.startsWith("https://")
+            val isUrl = Regex("https?://", RegexOption.IGNORE_CASE).containsMatchIn(normalizedContent)
 
 
             val prompt =
@@ -315,6 +336,9 @@ class SignalAiService {
                     KEYWORDS:
                     CATEGORY:
                     TARGET_LOCATION:
+                    REMINDER_DATE:
+                    REMINDER_TIME:
+                    DETECTED_URL:
 
                     Rules:
                     - TITLE: short useful title
@@ -323,6 +347,10 @@ class SignalAiService {
                     - CATEGORY: choose one useful category
                     - TARGET_LOCATION: identify a real-world place if clearly mentioned
                     - Otherwise write NONE
+                    - REMINDER_DATE: explicit future actionable date as YYYY-MM-DD, otherwise NONE; exclude publication dates.
+                    - REMINDER_TIME: explicit local event time as 24-hour HH:MM, otherwise NONE; do not infer.
+                    - DETECTED_URL: external website URL explicitly in the shared content; exclude the shared reel/short URL; otherwise NONE.
+                    - Today's local date: ${LocalDate.now()}
                     """.trimIndent()
 
                 } else {
@@ -339,6 +367,9 @@ class SignalAiService {
                     KEYWORDS:
                     CATEGORY:
                     TARGET_LOCATION:
+                    REMINDER_DATE:
+                    REMINDER_TIME:
+                    DETECTED_URL:
 
                     Rules:
                     - TITLE: short useful title
@@ -347,6 +378,10 @@ class SignalAiService {
                     - CATEGORY: choose one useful category
                     - TARGET_LOCATION: identify a real-world place if clearly mentioned
                     - Otherwise write NONE
+                    - REMINDER_DATE: explicit future actionable date as YYYY-MM-DD, otherwise NONE; exclude publication dates.
+                    - REMINDER_TIME: explicit local event time as 24-hour HH:MM, otherwise NONE; do not infer.
+                    - DETECTED_URL: external website URL explicitly in the shared content; otherwise NONE.
+                    - Today's local date: ${LocalDate.now()}
 
                     CONTENT:
 
@@ -384,6 +419,45 @@ class SignalAiService {
         }
     }
 
+
+    suspend fun analyzeImage(context: Context, uri: Uri, ocrText: String): AiResult {
+        return try {
+            val resolver = context.contentResolver
+            val imageBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: throw IllegalArgumentException("Unable to read shared image")
+            require(imageBytes.isNotEmpty()) { "Shared image is empty" }
+            require(imageBytes.size <= 20 * 1024 * 1024) { "Image exceeds 20 MB" }
+
+            val imagePart = MultipartBody.Part.createFormData(
+                "file",
+                uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "shared-image",
+                imageBytes.toRequestBody((resolver.getType(uri) ?: "image/jpeg").toMediaType())
+            )
+            val ocrPart = ocrText.toRequestBody("text/plain".toMediaType())
+            val captureDatePart = LocalDate.now().toString().toRequestBody("text/plain".toMediaType())
+            val response = withTimeout(600_000) {
+                SignalBackendClient.api.analyzeImage(imagePart, ocrPart, captureDatePart)
+            }
+            response.toAiResult(AiSource.BACKEND)
+        } catch (error: Exception) {
+            Log.e("SignalAI", "Gemini image analysis failed; falling back to OCR text", error)
+            understandContent(ocrText.ifBlank { "Shared image with no readable OCR text" })
+        }
+    }
+
+    private fun com.example.signal.data.network.AnalyzeResponse.toAiResult(source: AiSource) = AiResult(
+        title = title,
+        summary = summary,
+        keywords = keywords,
+        category = category,
+        targetLocation = target_location,
+        targetLatitude = target_latitude,
+        targetLongitude = target_longitude,
+        reminderDate = reminder_date,
+        reminderTime = reminder_time,
+        detectedUrl = detected_url,
+        source = source,
+    )
 
     private fun parseResponse(
         response: String
@@ -461,6 +535,14 @@ class SignalAiService {
             targetLocation =
                 extract("TARGET_LOCATION"),
 
+            reminderDate = extract("REMINDER_DATE").takeIf {
+                runCatching { LocalDate.parse(it) }.isSuccess
+            },
+
+            detectedUrl = extract("DETECTED_URL").takeIf {
+                it.startsWith("https://") || it.startsWith("http://")
+            },
+
             source =
                 AiSource.FIREBASE
         )
@@ -483,6 +565,12 @@ data class AiResult(
     val targetLatitude: Double? = null,
 
     val targetLongitude: Double? = null,
+
+    val reminderDate: String? = null,
+
+    val reminderTime: String? = null,
+
+    val detectedUrl: String? = null,
 
     val source: AiSource
 )

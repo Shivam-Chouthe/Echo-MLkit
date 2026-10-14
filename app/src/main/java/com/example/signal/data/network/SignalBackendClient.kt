@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 object SignalBackendClient {
 
     private const val BASE_URL =
-        "http://10.210.5.102:8000/"
+        "http://10.208.123.102:8000/"
 
 
     // =========================================================

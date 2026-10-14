@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.signal.data.local.MemoryEntity
 import com.example.signal.data.local.SignalDatabase
+import com.example.signal.data.location.DatedReminderScheduler
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -133,6 +134,7 @@ class LibraryViewModel(
 
     fun deleteMemory(memory: MemoryEntity) {
         viewModelScope.launch {
+            DatedReminderScheduler.cancel(getApplication(), memory.id)
             memoryDao.delete(memory)
         }
     }

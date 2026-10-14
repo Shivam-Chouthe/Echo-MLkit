@@ -7,6 +7,7 @@ import com.example.signal.data.location.LocationGeocoder
 import com.example.signal.data.ai.AiSource
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -42,15 +43,19 @@ import androidx.core.content.ContextCompat
 import com.example.signal.data.ai.SignalAiService
 import com.example.signal.data.local.MemoryEntity
 import com.example.signal.data.local.SignalDatabase
+import com.example.signal.data.location.DatedReminderScheduler
 import com.example.signal.data.location.LocationHelper
 import com.example.signal.data.source.ContentAdapterFactory
+import com.example.signal.data.source.ContentResult
 import com.example.signal.data.source.SourceDetector
 import kotlinx.coroutines.launch
 
 @Composable
 fun CaptureScreen(
     onBack: () -> Unit,
-    sharedText: String? = null
+    sharedText: String? = null,
+    sharedImageUri: Uri? = null,
+    shareRequestId: Long = 0L
 ) {
 
     val context = LocalContext.current
@@ -101,10 +106,14 @@ fun CaptureScreen(
     }
 
     var url by remember {
-        mutableStateOf(
-            extractUrl(sharedText ?: "")
-        )
+        mutableStateOf(sharedText?.trim().orEmpty())
     }
+
+    var selectedImageUri by remember { mutableStateOf(sharedImageUri) }
+    var reminderDate by remember { mutableStateOf<String?>(null) }
+    var reminderTime by remember { mutableStateOf<String?>(null) }
+    var detectedUrl by remember { mutableStateOf<String?>(null) }
+    var scheduledReminderAt by remember { mutableStateOf<Long?>(null) }
 
     var showResult by remember {
         mutableStateOf(!sharedText.isNullOrBlank())
@@ -118,6 +127,10 @@ fun CaptureScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) coroutineScope.launch {
+            selectedImageUri = uri
+            reminderDate = null
+            detectedUrl = null
+            scheduledReminderAt = null
             val extracted = ImageOcrHelper(context).extractTextFromUri(uri)
             url = extracted.ifBlank { "Captured photo/screenshot without detectable text" }
             showResult = true
@@ -164,11 +177,14 @@ fun CaptureScreen(
         mutableStateOf("")
     }
 
-    LaunchedEffect(sharedText) {
+    LaunchedEffect(sharedText, sharedImageUri, shareRequestId) {
 
-        if (!sharedText.isNullOrBlank()) {
+        if (sharedImageUri != null || !sharedText.isNullOrBlank()) {
 
-            url = extractUrl(sharedText)
+            selectedImageUri = sharedImageUri
+            url = sharedText?.trim().orEmpty().ifBlank {
+                if (sharedImageUri != null) "Shared image; analyzing with OCR and Gemini" else ""
+            }
 
             showResult = true
             saved = false
@@ -181,6 +197,9 @@ fun CaptureScreen(
             aiTargetLocation = ""
             modelTargetLatitude = null
             modelTargetLongitude = null
+            reminderDate = null
+            detectedUrl = null
+            scheduledReminderAt = null
         }
     }
 
@@ -331,11 +350,24 @@ fun CaptureScreen(
                                     aiService
                                 )
 
-                            val adapter =
-                                factory.getAdapter(url)
-
-                            val result =
-                                adapter.analyze(url)
+                            val result = if (selectedImageUri != null) {
+                                val imageResult = aiService.analyzeImage(context, selectedImageUri!!, url)
+                                ContentResult(
+                                    title = imageResult.title,
+                                    summary = imageResult.summary,
+                                    keywords = imageResult.keywords,
+                                    category = imageResult.category,
+                                    targetLocation = imageResult.targetLocation,
+                                    targetLatitude = imageResult.targetLatitude,
+                                    targetLongitude = imageResult.targetLongitude,
+                                    reminderDate = imageResult.reminderDate,
+                                    reminderTime = imageResult.reminderTime,
+                                    detectedUrl = imageResult.detectedUrl,
+                                    source = imageResult.source
+                                )
+                            } else {
+                                factory.getAdapter(url).analyze(url)
+                            }
 
                             aiTitle =
                                 result.title.ifBlank {
@@ -353,6 +385,9 @@ fun CaptureScreen(
 
                             modelTargetLatitude = result.targetLatitude
                             modelTargetLongitude = result.targetLongitude
+                            reminderDate = result.reminderDate
+                            reminderTime = result.reminderTime
+                            detectedUrl = result.detectedUrl
 
                             aiSource =
                                 result.source
@@ -378,6 +413,9 @@ fun CaptureScreen(
                                 generateFallbackKeywords(url)
 
                             aiTargetLocation = ""
+                            reminderDate = null
+                            reminderTime = null
+                            detectedUrl = null
                         }
 
                         // ------------------------------------------------
@@ -398,6 +436,10 @@ fun CaptureScreen(
                         targetLongitude =
                             modelTargetLongitude ?: geocodedTarget?.longitude
 
+                        scheduledReminderAt = reminderDate?.let {
+                            DatedReminderScheduler.timestampForDate(it, reminderTime)
+                        }
+
                         val memory =
                             MemoryEntity(
 
@@ -405,7 +447,7 @@ fun CaptureScreen(
 
                                 content = url,
 
-                                sourceUrl = url,
+                                sourceUrl = extractUrl(url),
 
                                 sourceType =
                                     SourceDetector
@@ -423,11 +465,15 @@ fun CaptureScreen(
 
                                 targetLocation =
                                     aiTargetLocation,
-                                            targetLatitude =
+                                targetLatitude =
                                             targetLatitude,
 
                                 targetLongitude =
-                                    targetLongitude
+                                    targetLongitude,
+                                reminderDate = reminderDate,
+                                reminderAt = scheduledReminderAt,
+                                reminderTime = reminderTime,
+                                detectedUrl = detectedUrl
                             )
 
 
@@ -439,6 +485,10 @@ fun CaptureScreen(
                             database
                                 .memoryDao()
                                 .insert(memory)
+
+                        scheduledReminderAt?.let { triggerAt ->
+                            DatedReminderScheduler.schedule(context, memoryId, triggerAt)
+                        }
 
                         if (
                             targetLatitude != null &&
@@ -521,6 +571,23 @@ fun CaptureScreen(
                 Text(
                     text = "SIGNAL UNDERSTANDING"
                 )
+
+                if (reminderDate != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(text = "DATE FOUND: $reminderDate")
+                    Text(
+                        text = if (scheduledReminderAt != null) {
+                            "Reminders scheduled for the event time, 6 hours before, and 30 minutes before."
+                        } else {
+                            "This date has passed, so no notification was scheduled."
+                        }
+                    )
+                }
+
+                if (!detectedUrl.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(text = "WEBSITE FOUND: $detectedUrl")
+                }
 
                 if (aiSource != null) {
 

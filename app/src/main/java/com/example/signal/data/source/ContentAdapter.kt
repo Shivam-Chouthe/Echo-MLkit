@@ -15,5 +15,8 @@ data class ContentResult(
     val targetLocation: String,
     val targetLatitude: Double? = null,
     val targetLongitude: Double? = null,
+    val reminderDate: String? = null,
+    val reminderTime: String? = null,
+    val detectedUrl: String? = null,
     val source: com.example.signal.data.ai.AiSource
 )

@@ -40,6 +40,9 @@ class YouTubeContentAdapter(
             targetLocation = result.targetLocation,
             targetLatitude = result.targetLatitude,
             targetLongitude = result.targetLongitude,
+            reminderDate = result.reminderDate,
+            reminderTime = result.reminderTime,
+            detectedUrl = result.detectedUrl,
             source = result.source
         )
     }

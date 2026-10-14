@@ -195,6 +195,43 @@ private fun MemoryDetailsContent(
             )
         }
 
+        memory.reminderDate?.let { date ->
+            DetailCard(
+                title = if (memory.reminderAt != null) "DATE REMINDER" else "DATE FOUND",
+                content = if (memory.reminderAt != null) {
+                    "$date · reminders at ${memory.reminderTime ?: "09:00"}, 6 hours before, and 30 minutes before"
+                } else {
+                    date
+                }
+            )
+        }
+
+        memory.detectedUrl?.let { website ->
+            DetailCard(
+                title = "WEBSITE FOUND",
+                content = website,
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Link,
+                        contentDescription = null,
+                        tint = SignalBlue
+                    )
+                }
+            )
+            Button(
+                onClick = {
+                    runCatching {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(website)))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(imageVector = Icons.Default.Link, contentDescription = null)
+                Spacer(modifier = Modifier.padding(4.dp))
+                Text(text = "Open detected website")
+            }
+        }
+
         DetailCard(
             title = "AI SUMMARY",
             content = memory.summary.ifBlank {

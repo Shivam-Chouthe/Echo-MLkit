@@ -1,5 +1,6 @@
 package com.example.signal.navigation
 
+import android.net.Uri
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -20,6 +21,8 @@ import com.example.signal.ui.search.SearchScreen
 fun SignalNavGraph(
     navController: NavHostController,
     sharedText: String?,
+    sharedImageUri: Uri? = null,
+    shareRequestId: Long = 0L,
     openedMemoryId: Long? = null
 ) {
 
@@ -72,6 +75,8 @@ fun SignalNavGraph(
         ) {
             CaptureScreen(
                 sharedText = sharedText,
+                sharedImageUri = sharedImageUri,
+                shareRequestId = shareRequestId,
                 onBack = {
                     navController.popBackStack()
                 }

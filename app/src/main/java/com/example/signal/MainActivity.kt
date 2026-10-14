@@ -23,6 +23,8 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private val sharedText = mutableStateOf<String?>(null)
+    private val sharedImageUri = mutableStateOf<Uri?>(null)
+    private val shareRequestId = mutableStateOf(0L)
 
     private var openedMemoryId =
         mutableStateOf<Long?>(null)
@@ -74,12 +76,14 @@ class MainActivity : ComponentActivity() {
                 SignalNavGraph(
                     navController = navController,
                     sharedText = sharedText.value,
+                    sharedImageUri = sharedImageUri.value,
+                    shareRequestId = shareRequestId.value,
                     openedMemoryId = openedMemoryId.value
                 )
 
-                LaunchedEffect(sharedText.value) {
+                LaunchedEffect(sharedText.value, sharedImageUri.value, shareRequestId.value) {
 
-                    if (!sharedText.value.isNullOrBlank()) {
+                    if (!sharedText.value.isNullOrBlank() || sharedImageUri.value != null) {
 
                         navController.navigate(
                             SignalRoutes.CAPTURE
@@ -98,6 +102,8 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
 
         setIntent(intent)
+
+        shareRequestId.value += 1
 
         processShareIntent(intent)
 
@@ -193,7 +199,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun processShareIntent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
+        if (intent?.action != Intent.ACTION_SEND) {
+            sharedText.value = null
+            sharedImageUri.value = null
+            return
+        }
         if (intent.type?.startsWith("image/") == true) {
             val uri = if (android.os.Build.VERSION.SDK_INT >= 33) {
                 intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
@@ -202,6 +212,7 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableExtra(Intent.EXTRA_STREAM)
             }
             if (uri != null) {
+                sharedImageUri.value = uri
                 lifecycleScope.launch {
                     val text = ImageOcrHelper(this@MainActivity)
                         .extractTextFromUri(uri)
@@ -213,6 +224,7 @@ class MainActivity : ComponentActivity() {
                 sharedText.value = "Captured image"
             }
         } else {
+            sharedImageUri.value = null
             sharedText.value = extractSharedText(intent)
         }
     }

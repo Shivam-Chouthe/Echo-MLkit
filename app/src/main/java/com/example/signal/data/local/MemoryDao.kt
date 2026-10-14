@@ -67,6 +67,9 @@ interface MemoryDao {
         id: Long
     ): MemoryEntity?
 
+    @Query("SELECT * FROM memories WHERE reminderAt IS NOT NULL AND reminderAt > :now ORDER BY reminderAt")
+    suspend fun getUpcomingReminders(now: Long): List<MemoryEntity>
+
 
     // =========================================================
     // LOCAL TEXT SEARCH

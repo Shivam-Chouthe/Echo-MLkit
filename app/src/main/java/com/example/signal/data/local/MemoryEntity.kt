@@ -29,5 +29,13 @@ data class MemoryEntity(
 
     val targetLongitude: Double? = null,
 
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+
+    val reminderDate: String? = null,
+
+    val reminderAt: Long? = null,
+
+    val reminderTime: String? = null,
+
+    val detectedUrl: String? = null
 )

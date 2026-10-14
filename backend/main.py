@@ -9,9 +9,10 @@ from urllib.request import Request, urlopen
 from html.parser import HTMLParser
 import json
 import re
+from datetime import date, time as datetime_time
 from types import SimpleNamespace
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 from google import genai
 from dotenv import load_dotenv
@@ -47,10 +48,13 @@ CANDIDATE_MODELS = list(dict.fromkeys([
 
 class AnalyzeRequest(BaseModel):
     content: str
+    capture_date: str | None = None
 
 
 class SocialAnalyzeRequest(BaseModel):
     url: str
+    capture_date: str | None = None
+    shared_text: str | None = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -61,6 +65,9 @@ class AnalyzeResponse(BaseModel):
     target_location: str
     target_latitude: float | None = None
     target_longitude: float | None = None
+    reminder_date: str | None = None
+    reminder_time: str | None = None
+    detected_url: str | None = None
 
 
 # ============================================================
@@ -131,6 +138,20 @@ def parse_response(text: str) -> AnalyzeResponse:
         )
 
 
+    try:
+        reminder_date = date.fromisoformat(extract("REMINDER_DATE")).isoformat()
+    except (TypeError, ValueError):
+        reminder_date = None
+
+    try:
+        reminder_time = datetime_time.fromisoformat(extract("REMINDER_TIME")).strftime("%H:%M")
+    except (TypeError, ValueError):
+        reminder_time = None
+
+    detected_url = extract("DETECTED_URL")
+    if detected_url and not re.match(r"^https?://\S+$", detected_url, re.I):
+        detected_url = None
+
     return AnalyzeResponse(
 
         title=(
@@ -158,7 +179,10 @@ def parse_response(text: str) -> AnalyzeResponse:
                 or "NONE"
         ),
         target_latitude=parse_coordinate(text, "TARGET_LATITUDE"),
-        target_longitude=parse_coordinate(text, "TARGET_LONGITUDE")
+        target_longitude=parse_coordinate(text, "TARGET_LONGITUDE"),
+        reminder_date=reminder_date,
+        reminder_time=reminder_time,
+        detected_url=detected_url,
     )
 
 
@@ -388,7 +412,11 @@ def analyze_content(
 
         youtube_url = extract_youtube_url(request.content)
         if youtube_url:
-            response = analyze_youtube_url(client, youtube_url, context=request.content)
+            response = analyze_youtube_url(
+                client,
+                youtube_url,
+                context=f"{request.content}\nUser's local capture date: {request.capture_date or date.today().isoformat()}",
+            )
             return parse_response(response.text or "")
 
 
@@ -404,6 +432,9 @@ SUMMARY:
 KEYWORDS:
 CATEGORY:
 TARGET_LOCATION:
+REMINDER_DATE:
+REMINDER_TIME:
+DETECTED_URL:
 
 Rules:
 
@@ -416,10 +447,14 @@ Rules:
 - Return the place name in TARGET_LOCATION and its coordinates as numeric TARGET_LATITUDE and TARGET_LONGITUDE lines. Leave coordinates blank when no specific physical place is supported.
 - Return the venue name in TARGET_LOCATION and coordinates in TARGET_LATITUDE and TARGET_LONGITUDE. If there is no specific place, use NONE and leave both coordinates empty.
 - If there is no location, write NONE
+- REMINDER_DATE: return an explicit future event, appointment, trip, release, or deadline date as YYYY-MM-DD. Resolve relative dates using the supplied user's local capture date. Use NONE when no actionable future date is clearly present; never schedule a historical date or the content's publication date. REMINDER_TIME: explicit local event time as 24-hour HH:MM when stated, otherwise NONE. Do not infer a time.
+- DETECTED_URL: return an external website or booking URL explicitly included in the content, excluding the shared social/video URL itself. Otherwise write NONE.
 
 Saved content:
 
 {request.content}
+
+User's local capture date: {request.capture_date or date.today().isoformat()}
 """
 
 
@@ -636,7 +671,7 @@ async def analyze_video(
             )
 
 
-        prompt = """
+        prompt = f"""
 You are Signal, an AI personal memory assistant.
 
 Analyze this video carefully.
@@ -660,6 +695,9 @@ SUMMARY:
 KEYWORDS:
 CATEGORY:
 TARGET_LOCATION:
+REMINDER_DATE:
+REMINDER_TIME:
+DETECTED_URL:
 
 Rules:
 
@@ -670,6 +708,9 @@ Rules:
 - TARGET_LOCATION: identify a real-world location only if clearly supported
 - If no location is clearly present, write NONE
 - Do not invent dates, locations, names, or events
+- REMINDER_DATE: return an explicit future event, appointment, trip, release, or deadline date as YYYY-MM-DD; use NONE when no actionable future date is clearly present. Do not use the video publication date. REMINDER_TIME: explicit local event time as 24-hour HH:MM when stated, otherwise NONE. Do not infer a time.
+- DETECTED_URL: return a full website URL visibly shown or spoken in the video only when clearly legible; otherwise write NONE.
+Today's date is {date.today().isoformat()}.
 """
 
 
@@ -852,7 +893,8 @@ def analyze_youtube_url(client, url: str, context: str = ""):
         canonical_url = f"https://www.youtube.com{urlparse(url).path}"
         prompt = f"""You are Echo, an AI personal memory assistant. This is a public YouTube Community post. Use URL Context to inspect the post image and read any text printed inside it. Report the post's actual message; never describe it merely as a post, image, or page. If the image contains a question, quote that question in the summary and make the title reflect it. If retrieval genuinely fails, say so explicitly instead of inventing generic details. Return exactly in this format:
 TITLE:\nSUMMARY:\nKEYWORDS:\nCATEGORY:\nTARGET_LOCATION:\nTARGET_LATITUDE:\nTARGET_LONGITUDE:
-Rules: concise title; summary at most 2 sentences; 5-10 comma-separated keywords. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put place name in TARGET_LOCATION and coordinates in the two coordinate fields; otherwise use NONE and leave coordinates blank.
+REMINDER_DATE:\nREMINDER_TIME:\nDETECTED_URL:
+Rules: concise title; summary at most 2 sentences; 5-10 comma-separated keywords. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put place name in TARGET_LOCATION and coordinates in the two coordinate fields; otherwise use NONE and leave coordinates blank. REMINDER_DATE is an explicit future actionable event date in YYYY-MM-DD format or NONE. DETECTED_URL is a clearly present full URL or NONE.
 URL: {canonical_url}
 User-provided context: {context}"""
         try:
@@ -870,9 +912,9 @@ User-provided context: {context}"""
             fallback_prompt = prompt + "\nAvailable page metadata:\n" + URLUnfurler().unfurl(url)
             response = generate_with_retry(client, fallback_prompt, purpose="YouTube Community post metadata fallback")
     else:
-        prompt = """You are Echo, an AI personal memory assistant. Analyze this YouTube video using its audiovisual content. Return exactly in this format:
-TITLE:\nSUMMARY:\nKEYWORDS:\nCATEGORY:\nTARGET_LOCATION:\nTARGET_LATITUDE:\nTARGET_LONGITUDE:
-Rules: concise title; summary at most 2 sentences; 5-10 comma-separated keywords. Use the video's content and user-provided context. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put place name in TARGET_LOCATION and coordinates in the two coordinate fields; otherwise use NONE and leave coordinates blank. Do not invent places.
+        prompt = f"""You are Echo, an AI personal memory assistant. Analyze this YouTube video using its audiovisual content. Return exactly in this format:
+TITLE:\nSUMMARY:\nKEYWORDS:\nCATEGORY:\nTARGET_LOCATION:\nTARGET_LATITUDE:\nTARGET_LONGITUDE:\nREMINDER_DATE:\nREMINDER_TIME:\nDETECTED_URL:
+Rules: concise title; summary at most 2 sentences; 5-10 comma-separated keywords. Use the video's content and user-provided context. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put place name in TARGET_LOCATION and coordinates in the two coordinate fields; otherwise use NONE and leave coordinates blank. Do not invent places. REMINDER_DATE is an explicit future actionable event date in YYYY-MM-DD format or NONE. DETECTED_URL is a clearly present full URL or NONE. Today's date is {date.today().isoformat()}.
 
 User-provided context: {context}"""
         try:
@@ -918,10 +960,14 @@ def analyze_social(request: SocialAnalyzeRequest):
     try:
         client = get_gemini_client()
         if is_youtube_url(request.url):
-            response = analyze_youtube_url(client, request.url)
+            response = analyze_youtube_url(
+                client,
+                request.url,
+                context=f"{request.shared_text or ''}\nUser's local capture date: {request.capture_date or date.today().isoformat()}",
+            )
         else:
             metadata = URLUnfurler().unfurl(request.url)
-            prompt = f"""You are Echo, an AI personal memory assistant. Analyze this saved URL using only the metadata below.
+            prompt = f"""You are Echo, an AI personal memory assistant. Analyze this saved URL and any accessible public page content using the metadata and shared text below. Do not invent details if the page cannot be retrieved.
 Return exactly:
 TITLE:
 SUMMARY:
@@ -930,12 +976,79 @@ CATEGORY:
 TARGET_LOCATION:
 TARGET_LATITUDE:
 TARGET_LONGITUDE:
-Keep the summary to two sentences and use 5-10 comma-separated keywords. Do not invent details absent from metadata. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put its name in TARGET_LOCATION and numeric coordinates in TARGET_LATITUDE / TARGET_LONGITUDE. Otherwise use NONE and leave coordinates blank.
+REMINDER_DATE:
+REMINDER_TIME:
+DETECTED_URL:
+Keep the summary to two sentences and use 5-10 comma-separated keywords. Do not invent details absent from the page or metadata. If category is PLACE or mentions a specific physical venue/landmark/cafe/restaurant, you MUST populate target_place with clean name, accurate float latitude, and accurate float longitude from world knowledge. Put its name in TARGET_LOCATION and numeric coordinates in TARGET_LATITUDE / TARGET_LONGITUDE. Otherwise use NONE and leave coordinates blank. REMINDER_DATE is an explicit future actionable event date in YYYY-MM-DD format or NONE. DETECTED_URL is an external website/booking URL explicitly contained in the post, excluding the shared social/video URL, or NONE. User's local capture date: {request.capture_date or date.today().isoformat()}.
 
 {metadata}"""
-            response = generate_with_retry(client, prompt, purpose="social URL metadata analysis")
+            prompt += f"\nShared text or caption: {request.shared_text or '(none)'}"
+            try:
+                from google.genai import types
+                response = generate_with_retry(
+                    client,
+                    prompt,
+                    purpose="social URL context analysis",
+                    config=types.GenerateContentConfig(tools=[{"url_context": {}}]),
+                    models=list(dict.fromkeys(["gemini-2.5-flash", *CANDIDATE_MODELS])),
+                )
+            except Exception as retrieval_error:
+                print(f"Social URL context unavailable; using shared text and page metadata: {retrieval_error}")
+                response = generate_with_retry(client, prompt, purpose="social URL metadata analysis")
         return parse_response(response.text or "")
     except Exception as error:
         if is_retryable_error(error):
             return _heuristic_fallback(request.url)
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.post("/analyze-image", response_model=AnalyzeResponse)
+async def analyze_image(
+        file: UploadFile = File(...),
+        ocr_text: str = Form(""),
+        capture_date: str = Form(""),
+):
+    """Use Gemini vision together with on-device OCR for shared photos."""
+    try:
+        from google.genai import types
+
+        image_bytes = await file.read()
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="Image is empty")
+        if len(image_bytes) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Image exceeds 20 MB")
+
+        image_part = types.Part.from_bytes(
+            data=image_bytes,
+            mime_type=file.content_type or "image/jpeg",
+        )
+        prompt = f"""You are Signal, an AI personal memory assistant. Analyze this image visually and use on-device OCR text as supporting evidence. Correct OCR errors only when the image makes the intended text clear. Read complex layouts, event posters, tickets, screenshots, dates, and printed website links. Never invent unreadable text.
+
+Return exactly:
+TITLE:
+SUMMARY:
+KEYWORDS:
+CATEGORY:
+TARGET_LOCATION:
+TARGET_LATITUDE:
+TARGET_LONGITUDE:
+REMINDER_DATE:
+REMINDER_TIME:
+DETECTED_URL:
+
+Use a concise title, a summary of at most two sentences, and 5-10 comma-separated keywords. Return an explicit future event, appointment, trip, release, or deadline date as YYYY-MM-DD only when clearly present; otherwise REMINDER_DATE: NONE. Return an event time as 24-hour HH:MM only when explicitly stated; otherwise REMINDER_TIME: NONE. Do not treat a publication/capture date or historical date as a reminder. Return a full website URL only when legible in the image or OCR; otherwise DETECTED_URL: NONE. Return location coordinates only for a clearly identified real place; otherwise TARGET_LOCATION: NONE and leave coordinates blank. Today's date in the user's local timezone is {capture_date or date.today().isoformat()}.
+
+On-device OCR text:
+{ocr_text[:12000] or '(No text detected by OCR)'}"""
+        response = generate_with_retry(
+            client=get_gemini_client(),
+            contents=[image_part, prompt],
+            purpose="shared image analysis",
+        )
+        return parse_response(response.text or "")
+    except HTTPException:
+        raise
+    except Exception as error:
+        if is_retryable_error(error):
+            return _heuristic_fallback(ocr_text or file.filename or "Saved image")
         raise HTTPException(status_code=500, detail=str(error))
