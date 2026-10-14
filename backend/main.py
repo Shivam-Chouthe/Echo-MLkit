@@ -13,9 +13,11 @@ from datetime import date, time as datetime_time
 from types import SimpleNamespace
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from google import genai
 from dotenv import load_dotenv
+import uvicorn
 
 
 # ============================================================
@@ -32,6 +34,14 @@ load_dotenv()
 app = FastAPI(
     title="Signal AI Backend",
     version="2.2.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -79,9 +89,7 @@ def get_gemini_client():
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        raise Exception(
-            "GEMINI_API_KEY is missing from .env"
-        )
+        raise RuntimeError("GEMINI_API_KEY is missing. Set it in the environment or backend/.env.")
 
     return genai.Client(
         api_key=api_key
@@ -96,8 +104,8 @@ def get_gemini_client():
 def root():
 
     return {
-        "status": "Signal backend is running",
-        "version": "2.2.0"
+        "status": "healthy",
+        "service": "Signal API"
     }
 
 
@@ -1052,3 +1060,8 @@ On-device OCR text:
         if is_retryable_error(error):
             return _heuristic_fallback(ocr_text or file.filename or "Saved image")
         raise HTTPException(status_code=500, detail=str(error))
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

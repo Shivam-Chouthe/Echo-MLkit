@@ -1,4 +1,8 @@
 fastapi
 uvicorn[standard]
+# The backend imports the google.genai SDK from this package.
 google-genai
+google-generativeai
 python-dotenv
+python-multipart
+pydantic

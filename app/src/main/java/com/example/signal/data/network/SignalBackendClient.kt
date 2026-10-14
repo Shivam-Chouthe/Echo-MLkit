@@ -1,5 +1,6 @@
 package com.example.signal.data.network
 
+import com.example.signal.BuildConfig
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -8,8 +9,7 @@ import java.util.concurrent.TimeUnit
 
 object SignalBackendClient {
 
-    private const val BASE_URL =
-        "http://10.208.123.102:8000/"
+    private val BASE_URL = BuildConfig.BASE_URL
 
 
     // =========================================================

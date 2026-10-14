@@ -22,7 +22,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("String", "BASE_URL", "\"https://signal-backend.onrender.com/\"")
+        }
         release {
+            buildConfigField("String", "BASE_URL", "\"https://signal-backend.onrender.com/\"")
             optimization {
                 enable = false
             }
@@ -33,6 +37,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
     buildFeatures {
+        buildConfig = true
         compose = true
     }
 }
